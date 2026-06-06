@@ -4,16 +4,41 @@ import (
 	"errors"
 	"net/http"
 
+	"portfolio-tracker/internal/config"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
+const refreshTokenCookie = "refresh_token"
+
 type Handler struct {
 	svc *Service
+	cfg *config.Config
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, cfg *config.Config) *Handler {
+	return &Handler{svc: svc, cfg: cfg}
+}
+
+func (h *Handler) setRefreshCookie(c *gin.Context, token string) {
+	sameSite := http.SameSiteStrictMode
+	maxAge := int(h.svc.refreshExpiry.Seconds())
+	c.SetSameSite(sameSite)
+	c.SetCookie(
+		refreshTokenCookie,
+		token,
+		maxAge,
+		"/",
+		h.cfg.CookieDomain,
+		h.cfg.CookieSecure,
+		true, // httpOnly
+	)
+}
+
+func (h *Handler) clearRefreshCookie(c *gin.Context) {
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(refreshTokenCookie, "", -1, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
 }
 
 func (h *Handler) Register(c *gin.Context) {
@@ -36,7 +61,14 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"id": user.ID, "email": user.Email})
+	pair, err := h.svc.Login(req.Email, req.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "registration succeeded but login failed"})
+		return
+	}
+
+	h.setRefreshCookie(c, pair.RefreshToken)
+	c.JSON(http.StatusCreated, gin.H{"id": user.ID, "email": user.Email, "access_token": pair.AccessToken})
 }
 
 func (h *Handler) Login(c *gin.Context) {
@@ -59,25 +91,35 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, pair)
+	h.setRefreshCookie(c, pair.RefreshToken)
+	c.JSON(http.StatusOK, gin.H{"access_token": pair.AccessToken})
 }
 
 func (h *Handler) Refresh(c *gin.Context) {
-	var req struct {
-		RefreshToken string `json:"refresh_token" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	refreshToken, err := c.Cookie(refreshTokenCookie)
+	if err != nil || refreshToken == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing refresh token"})
 		return
 	}
 
-	pair, err := h.svc.RefreshToken(req.RefreshToken)
+	pair, err := h.svc.RefreshToken(c.Request.Context(), refreshToken)
 	if err != nil {
+		h.clearRefreshCookie(c)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
 		return
 	}
 
-	c.JSON(http.StatusOK, pair)
+	h.setRefreshCookie(c, pair.RefreshToken)
+	c.JSON(http.StatusOK, gin.H{"access_token": pair.AccessToken})
+}
+
+func (h *Handler) Logout(c *gin.Context) {
+	refreshToken, err := c.Cookie(refreshTokenCookie)
+	if err == nil && refreshToken != "" {
+		_ = h.svc.InvalidateRefreshToken(c.Request.Context(), refreshToken)
+	}
+	h.clearRefreshCookie(c)
+	c.Status(http.StatusNoContent)
 }
 
 // GetCurrentUserID extracts the authenticated user ID from gin context.

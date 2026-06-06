@@ -34,6 +34,9 @@ type Config struct {
 	PriceLoaderWorkers        int
 	PriceLoaderBaseBackoffMs  int
 	PriceLoaderMaxBackoffMs   int
+
+	CookieSecure bool
+	CookieDomain string
 }
 
 func Load() (*Config, error) {
@@ -77,6 +80,9 @@ func Load() (*Config, error) {
 		PriceLoaderWorkers:       getEnvInt("PRICE_LOADER_WORKERS", 3),
 		PriceLoaderBaseBackoffMs: getEnvInt("PRICE_LOADER_BASE_BACKOFF_MS", 1000),
 		PriceLoaderMaxBackoffMs:  getEnvInt("PRICE_LOADER_MAX_BACKOFF_MS", 32000),
+
+		CookieSecure: getEnv("COOKIE_SECURE", "false") == "true",
+		CookieDomain: getEnv("COOKIE_DOMAIN", ""),
 	}, nil
 }
 
