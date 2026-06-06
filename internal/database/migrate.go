@@ -12,5 +12,6 @@ func Migrate(db *gorm.DB) error {
 		&model.Portfolio{},
 		&model.Transaction{},
 		&model.PriceCacheHistory{},
+		&model.Instrument{},
 	)
 }
