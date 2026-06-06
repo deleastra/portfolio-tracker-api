@@ -51,6 +51,12 @@ func (cc *CachedClient) GetQuote(ctx context.Context, symbol string) (*QuoteResp
 	return q, nil
 }
 
+// PriceInfo holds current price and day change percent for a symbol.
+type PriceInfo struct {
+	Price         float64
+	DayChangePct  float64
+}
+
 // GetCurrentPrices fetches current prices for multiple symbols, using cache where available.
 // Symbols that fail to fetch are skipped (partial results are returned without error).
 func (cc *CachedClient) GetCurrentPrices(ctx context.Context, symbols []string) (map[string]float64, error) {
@@ -64,6 +70,45 @@ func (cc *CachedClient) GetCurrentPrices(ctx context.Context, symbols []string) 
 		prices[sym] = q.RegularMarketPrice
 	}
 	return prices, nil
+}
+
+// GetCurrentPriceInfos fetches current price and day change % for multiple symbols.
+// Symbols that fail to fetch are skipped.
+func (cc *CachedClient) GetCurrentPriceInfos(ctx context.Context, symbols []string) (map[string]PriceInfo, error) {
+	infos := make(map[string]PriceInfo, len(symbols))
+	for _, sym := range symbols {
+		q, err := cc.GetQuote(ctx, sym)
+		if err != nil {
+			continue
+		}
+		infos[sym] = PriceInfo{
+			Price:        q.RegularMarketPrice,
+			DayChangePct: q.RegularMarketChangePercent,
+		}
+	}
+	return infos, nil
+}
+
+// InvalidateAll removes all cached price quotes from Redis, forcing fresh fetches on the next request.
+// Uses SCAN to avoid blocking Redis in production.
+func (cc *CachedClient) InvalidateAll(ctx context.Context) error {
+	var cursor uint64
+	for {
+		keys, nextCursor, err := cc.redis.Scan(ctx, cursor, quoteKeyPrefix+"*", 100).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			if err := cc.redis.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
 }
 
 // GetHistorical delegates to the underlying client (no Redis cache for historical bars —

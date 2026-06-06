@@ -14,19 +14,25 @@ import (
 	"time"
 )
 
-// QuoteResponse is the minimal shape returned by Yahoo Finance v8 quote endpoint.
+// QuoteResponse is the minimal shape returned by Yahoo Finance quote endpoint.
 type QuoteResponse struct {
-	Symbol             string  `json:"symbol"`
-	RegularMarketPrice float64 `json:"regularMarketPrice"`
-	Currency           string  `json:"currency"`
+	Symbol                     string  `json:"symbol"`
+	LongName                   string  `json:"longName"`
+	ShortName                  string  `json:"shortName"`
+	RegularMarketPrice         float64 `json:"regularMarketPrice"`
+	RegularMarketChangePercent float64 `json:"regularMarketChangePercent"`
+	Currency                   string  `json:"currency"`
 }
 
 type quoteAPIResponse struct {
 	QuoteResponse struct {
 		Result []struct {
-			Symbol             string  `json:"symbol"`
-			RegularMarketPrice float64 `json:"regularMarketPrice"`
-			Currency           string  `json:"currency"`
+			Symbol                     string  `json:"symbol"`
+			LongName                   string  `json:"longName"`
+			ShortName                  string  `json:"shortName"`
+			RegularMarketPrice         float64 `json:"regularMarketPrice"`
+			RegularMarketChangePercent float64 `json:"regularMarketChangePercent"`
+			Currency                   string  `json:"currency"`
 		} `json:"result"`
 		Error interface{} `json:"error"`
 	} `json:"quoteResponse"`
@@ -62,15 +68,17 @@ func NewClient(baseURL string) *Client {
 	return c
 }
 
-// refreshCrumb obtains a new Yahoo Finance crumb by visiting fc.yahoo.com then the crumb endpoint.
+// refreshCrumb obtains a new Yahoo Finance crumb by visiting finance.yahoo.com then the crumb endpoint.
 func (c *Client) refreshCrumb(ctx context.Context) error {
-	// Step 1: visit consent/cookie origin to set cookies
-	initURL := "https://fc.yahoo.com"
+	// Step 1: visit finance.yahoo.com to set the necessary cookies for authenticated API access
+	initURL := "https://finance.yahoo.com"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, initURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("cookie init: %w", err)
@@ -174,7 +182,7 @@ func (c *Client) doGet(ctx context.Context, rawURL string, crumb string) ([]byte
 
 // GetQuote fetches the current price for a single symbol.
 func (c *Client) GetQuote(ctx context.Context, symbol string) (*QuoteResponse, error) {
-	rawURL := fmt.Sprintf("%s/v8/finance/quote?symbols=%s", c.baseURL, symbol)
+	rawURL := fmt.Sprintf("%s/v7/finance/quote?symbols=%s", c.baseURL, symbol)
 	body, err := c.doWithCrumb(ctx, rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("GetQuote %s: %w", symbol, err)
@@ -190,9 +198,12 @@ func (c *Client) GetQuote(ctx context.Context, symbol string) (*QuoteResponse, e
 
 	r := apiResp.QuoteResponse.Result[0]
 	return &QuoteResponse{
-		Symbol:             r.Symbol,
-		RegularMarketPrice: r.RegularMarketPrice,
-		Currency:           r.Currency,
+		Symbol:                     r.Symbol,
+		LongName:                   r.LongName,
+		ShortName:                  r.ShortName,
+		RegularMarketPrice:         r.RegularMarketPrice,
+		RegularMarketChangePercent: r.RegularMarketChangePercent,
+		Currency:                   r.Currency,
 	}, nil
 }
 
