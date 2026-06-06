@@ -22,6 +22,7 @@ type QuoteResponse struct {
 	RegularMarketPrice         float64 `json:"regularMarketPrice"`
 	RegularMarketChangePercent float64 `json:"regularMarketChangePercent"`
 	Currency                   string  `json:"currency"`
+	FullExchangeName           string  `json:"fullExchangeName"`
 }
 
 type quoteAPIResponse struct {
@@ -33,6 +34,7 @@ type quoteAPIResponse struct {
 			RegularMarketPrice         float64 `json:"regularMarketPrice"`
 			RegularMarketChangePercent float64 `json:"regularMarketChangePercent"`
 			Currency                   string  `json:"currency"`
+			FullExchangeName           string  `json:"fullExchangeName"`
 		} `json:"result"`
 		Error interface{} `json:"error"`
 	} `json:"quoteResponse"`
@@ -208,6 +210,7 @@ func (c *Client) GetQuote(ctx context.Context, symbol string) (*QuoteResponse, e
 		RegularMarketPrice:         r.RegularMarketPrice,
 		RegularMarketChangePercent: r.RegularMarketChangePercent,
 		Currency:                   r.Currency,
+		FullExchangeName:           r.FullExchangeName,
 	}, nil
 }
 
@@ -270,4 +273,46 @@ func (c *Client) GetHistorical(ctx context.Context, symbol string, from, to time
 
 	log.Printf("[yahoo] GetHistorical: %s got %d bars elapsed=%s", symbol, len(bars), time.Since(start))
 	return bars, nil
+}
+
+// AssetProfile holds sector and industry data from Yahoo Finance quoteSummary.
+type AssetProfile struct {
+	Sector   string
+	Industry string
+}
+
+type assetProfileAPIResponse struct {
+	QuoteSummary struct {
+		Result []struct {
+			AssetProfile struct {
+				Sector   string `json:"sector"`
+				Industry string `json:"industry"`
+			} `json:"assetProfile"`
+		} `json:"result"`
+		Error interface{} `json:"error"`
+	} `json:"quoteSummary"`
+}
+
+// GetAssetProfile fetches sector and industry for a symbol via quoteSummary assetProfile module.
+func (c *Client) GetAssetProfile(ctx context.Context, symbol string) (*AssetProfile, error) {
+	log.Printf("[yahoo] GetAssetProfile: fetching %s", symbol)
+	rawURL := fmt.Sprintf("%s/v10/finance/quoteSummary/%s?modules=assetProfile", c.baseURL, symbol)
+	body, err := c.doWithCrumb(ctx, rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("GetAssetProfile %s: %w", symbol, err)
+	}
+
+	var apiResp assetProfileAPIResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil, fmt.Errorf("GetAssetProfile decode %s: %w", symbol, err)
+	}
+	if len(apiResp.QuoteSummary.Result) == 0 {
+		return nil, fmt.Errorf("no assetProfile data for symbol %s", symbol)
+	}
+
+	p := apiResp.QuoteSummary.Result[0].AssetProfile
+	return &AssetProfile{
+		Sector:   p.Sector,
+		Industry: p.Industry,
+	}, nil
 }

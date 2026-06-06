@@ -82,8 +82,8 @@ func (cc *CachedClient) GetQuote(ctx context.Context, symbol string) (*QuoteResp
 
 // PriceInfo holds current price and day change percent for a symbol.
 type PriceInfo struct {
-	Price         float64
-	DayChangePct  float64
+	Price        float64
+	DayChangePct float64
 }
 
 // GetCurrentPrices fetches current prices for multiple symbols, using cache where available.
@@ -144,4 +144,31 @@ func (cc *CachedClient) InvalidateAll(ctx context.Context) error {
 // stored in price_cache_history DB table instead).
 func (cc *CachedClient) GetHistorical(ctx context.Context, symbol string, from, to time.Time) ([]HistoricalBar, error) {
 	return cc.client.GetHistorical(ctx, symbol, from, to)
+}
+
+const assetProfileKeyPrefix = "asset_profile:"
+const assetProfileTTL = 7 * 24 * time.Hour
+
+// GetAssetProfile returns sector and industry for a symbol, cached in Redis for 7 days.
+func (cc *CachedClient) GetAssetProfile(ctx context.Context, symbol string) (*AssetProfile, error) {
+	key := assetProfileKeyPrefix + symbol
+
+	if cached, err := cc.redis.Get(ctx, key).Bytes(); err == nil {
+		var p AssetProfile
+		if json.Unmarshal(cached, &p) == nil {
+			log.Printf("[yahoo] GetAssetProfile cache HIT: %s", symbol)
+			return &p, nil
+		}
+	}
+
+	log.Printf("[yahoo] GetAssetProfile cache MISS: %s", symbol)
+	p, err := cc.client.GetAssetProfile(ctx, symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	if b, err := json.Marshal(p); err == nil {
+		cc.redis.Set(ctx, key, b, assetProfileTTL)
+	}
+	return p, nil
 }
