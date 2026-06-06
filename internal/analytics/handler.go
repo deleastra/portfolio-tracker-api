@@ -201,7 +201,7 @@ func (h *Handler) Performance(c *gin.Context) {
 	// fetch live intraday prices so the chart extends to the current moment.
 	var todayPortfolioPrices map[string]float64
 	today := time.Now().UTC().Truncate(24 * time.Hour)
-	if !to.Before(today) && isUSMarketOpen() {
+	if !to.Before(today) && yahoofinance.IsUSMarketOpen() {
 		symSet := make(map[string]struct{})
 		for _, tx := range txs {
 			symSet[tx.Symbol] = struct{}{}
@@ -228,7 +228,7 @@ func (h *Handler) Performance(c *gin.Context) {
 	}
 
 	// Add today's benchmark intraday price when market is open.
-	if !to.Before(today) && isUSMarketOpen() {
+	if !to.Before(today) && yahoofinance.IsUSMarketOpen() {
 		if q, err := h.yf.GetQuote(c.Request.Context(), benchmark); err == nil && q.RegularMarketPrice > 0 {
 			benchmarkBars[today] = q.RegularMarketPrice
 		}
@@ -440,11 +440,14 @@ func (h *Handler) fetchHistoricalWithCache(ctx context.Context, symbol string, f
 	}
 
 	// If DB cache covers ≥50% of expected trading days, skip the API call —
-	// but only if the cache is fresh enough (latest entry is within 1 trading day
-	// of `to`). This prevents stale cache from creating gaps when `to` is today
-	// and yesterday's close was not yet cached.
+	// but only if the cache includes the last trading day on or before `to`.
+	// Walk backwards from `to` skipping weekends to find that day.
+	lastTradingDay := to.Truncate(24 * time.Hour)
+	for lastTradingDay.Weekday() == time.Saturday || lastTradingDay.Weekday() == time.Sunday {
+		lastTradingDay = lastTradingDay.AddDate(0, 0, -1)
+	}
 	expectedDays := int(to.Sub(from).Hours()/24) * 5 / 7
-	cacheIsFresh := !latestCached.IsZero() && to.Sub(latestCached) <= 3*24*time.Hour // covers weekends
+	cacheIsFresh := !latestCached.IsZero() && !latestCached.Before(lastTradingDay)
 	if len(dayMap) > 0 && len(dayMap) >= expectedDays/2 && cacheIsFresh {
 		return dayMap, nil
 	}
@@ -482,23 +485,6 @@ func (h *Handler) fetchHistoricalWithCache(ctx context.Context, symbol string, f
 	}
 
 	return dayMap, nil
-}
-
-// isUSMarketOpen returns true when the US stock market is currently open.
-// Market hours: Monday–Friday 09:30–16:00 Eastern Time (no holiday calendar).
-func isUSMarketOpen() bool {
-	loc, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		return false
-	}
-	now := time.Now().In(loc)
-	wd := now.Weekday()
-	if wd == time.Saturday || wd == time.Sunday {
-		return false
-	}
-	open := time.Date(now.Year(), now.Month(), now.Day(), 9, 30, 0, 0, loc)
-	close := time.Date(now.Year(), now.Month(), now.Day(), 16, 0, 0, 0, loc)
-	return now.After(open) && now.Before(close)
 }
 
 // computePortfolioReturns builds a daily Time-Weighted Return (TWR) series.
