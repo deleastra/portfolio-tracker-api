@@ -3,10 +3,37 @@ package yahoofinance
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+// IsUSMarketOpen returns true when the US stock market is currently open.
+// Market hours: Monday–Friday 09:30–16:00 Eastern Time (no holiday calendar).
+func IsUSMarketOpen() bool {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return false
+	}
+	now := time.Now().In(loc)
+	wd := now.Weekday()
+	if wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+	open := time.Date(now.Year(), now.Month(), now.Day(), 9, 30, 0, 0, loc)
+	close := time.Date(now.Year(), now.Month(), now.Day(), 16, 0, 0, 0, loc)
+	return now.After(open) && now.Before(close)
+}
+
+// LastTradingDay returns the most recent weekday on or before today (UTC).
+func LastTradingDay() time.Time {
+	d := time.Now().UTC().Truncate(24 * time.Hour)
+	for d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
+		d = d.AddDate(0, 0, -1)
+	}
+	return d
+}
 
 const quoteKeyPrefix = "price:quote:"
 
@@ -33,11 +60,13 @@ func (cc *CachedClient) GetQuote(ctx context.Context, symbol string) (*QuoteResp
 	if err == nil {
 		var q QuoteResponse
 		if json.Unmarshal(cached, &q) == nil {
+			log.Printf("[yahoo] GetQuote cache HIT: %s", symbol)
 			return &q, nil
 		}
 	}
 
 	// Cache miss — fetch from Yahoo Finance
+	log.Printf("[yahoo] GetQuote cache MISS: %s", symbol)
 	q, err := cc.client.GetQuote(ctx, symbol)
 	if err != nil {
 		return nil, err

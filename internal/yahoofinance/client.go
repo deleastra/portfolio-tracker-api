@@ -182,9 +182,12 @@ func (c *Client) doGet(ctx context.Context, rawURL string, crumb string) ([]byte
 
 // GetQuote fetches the current price for a single symbol.
 func (c *Client) GetQuote(ctx context.Context, symbol string) (*QuoteResponse, error) {
+	log.Printf("[yahoo] GetQuote: fetching quote for %s", symbol)
+	start := time.Now()
 	rawURL := fmt.Sprintf("%s/v7/finance/quote?symbols=%s", c.baseURL, symbol)
 	body, err := c.doWithCrumb(ctx, rawURL)
 	if err != nil {
+		log.Printf("[yahoo] GetQuote: error fetching %s: %v", symbol, err)
 		return nil, fmt.Errorf("GetQuote %s: %w", symbol, err)
 	}
 
@@ -197,6 +200,7 @@ func (c *Client) GetQuote(ctx context.Context, symbol string) (*QuoteResponse, e
 	}
 
 	r := apiResp.QuoteResponse.Result[0]
+	log.Printf("[yahoo] GetQuote: %s price=%.4f elapsed=%s", symbol, r.RegularMarketPrice, time.Since(start))
 	return &QuoteResponse{
 		Symbol:                     r.Symbol,
 		LongName:                   r.LongName,
@@ -223,12 +227,15 @@ type historicalAPIResponse struct {
 
 // GetHistorical fetches daily adjusted close prices for a symbol between from and to (inclusive).
 func (c *Client) GetHistorical(ctx context.Context, symbol string, from, to time.Time) ([]HistoricalBar, error) {
+	log.Printf("[yahoo] GetHistorical: fetching %s from %s to %s", symbol, from.Format("2006-01-02"), to.Format("2006-01-02"))
+	start := time.Now()
 	rawURL := fmt.Sprintf(
 		"%s/v8/finance/chart/%s?period1=%d&period2=%d&interval=1d",
 		c.baseURL, symbol, from.Unix(), to.Unix(),
 	)
 	body, err := c.doWithCrumb(ctx, rawURL)
 	if err != nil {
+		log.Printf("[yahoo] GetHistorical: error fetching %s: %v", symbol, err)
 		return nil, fmt.Errorf("GetHistorical %s: %w", symbol, err)
 	}
 
@@ -261,5 +268,6 @@ func (c *Client) GetHistorical(ctx context.Context, symbol string, from, to time
 		})
 	}
 
+	log.Printf("[yahoo] GetHistorical: %s got %d bars elapsed=%s", symbol, len(bars), time.Since(start))
 	return bars, nil
 }
