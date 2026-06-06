@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"sort"
+	"time"
 
 	"portfolio-tracker/internal/model"
 )
@@ -14,6 +15,7 @@ type Position struct {
 	Quantity    float64
 	AvgCost     float64 // weighted average cost per share
 	CostBasis   float64 // total cost basis = quantity * avg_cost
+	EntryDate   time.Time // first buy date of current holding period (reset when fully sold)
 }
 
 // RealizedPnL records profit/loss from a completed (partial or full) sell.
@@ -48,6 +50,10 @@ func CalculatePositions(txs []model.Transaction) (positions map[string]*Position
 
 		switch tx.Action {
 		case model.ActionBuy:
+			// Set entry date only when entering from zero (first buy or re-entry after full exit)
+			if pos.Quantity <= 1e-9 {
+				pos.EntryDate = tx.TradeDate
+			}
 			// WAC recalculation on each buy
 			totalCost := pos.CostBasis + tx.NetAmount
 			totalQty := pos.Quantity + tx.Quantity
@@ -76,6 +82,7 @@ func CalculatePositions(txs []model.Transaction) (positions map[string]*Position
 				pos.Quantity = 0
 				pos.CostBasis = 0
 				pos.AvgCost = 0
+				pos.EntryDate = time.Time{} // reset entry date — fully exited
 			}
 		}
 

@@ -9,6 +9,7 @@ import (
 	"portfolio-tracker/internal/auth"
 	"portfolio-tracker/internal/config"
 	"portfolio-tracker/internal/database"
+	"portfolio-tracker/internal/instrument"
 	"portfolio-tracker/internal/portfolio"
 	"portfolio-tracker/internal/transaction"
 	"portfolio-tracker/internal/yahoofinance"
@@ -48,8 +49,9 @@ func main() {
 	authSvc := auth.NewService(db, rdb, cfg.JWTSecret, cfg.JWTAccessExpiry, cfg.JWTRefreshExpiry)
 	authHandler := auth.NewHandler(authSvc, cfg)
 	txHandler := transaction.NewHandler(db)
-	portfolioHandler := portfolio.NewHandler(db, yfClient)
-	analyticsHandler := analytics.NewHandler(db, yfClient)
+	instrumentSvc := instrument.NewService(db, yfClient)
+	portfolioHandler := portfolio.NewHandler(db, yfClient, instrumentSvc)
+	analyticsHandler := analytics.NewHandler(db, yfClient, instrumentSvc)
 
 	if cfg.AppEnv == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -75,6 +77,7 @@ func main() {
 		protected.Use(auth.JWTMiddleware(authSvc))
 		{
 			protected.GET("/portfolio/summary", portfolioHandler.Summary)
+			protected.GET("/portfolio/export/csv", portfolioHandler.ExportCSV)
 			protected.GET("/portfolio/quote/:symbol", portfolioHandler.Quote)
 
 			protected.GET("/transactions", txHandler.List)

@@ -1,12 +1,15 @@
 package portfolio
 
 import (
+	"encoding/csv"
+	"fmt"
 	"log"
 	"net/http"
 	"sort"
 	"time"
 
 	"portfolio-tracker/internal/auth"
+	"portfolio-tracker/internal/instrument"
 	"portfolio-tracker/internal/model"
 	"portfolio-tracker/internal/yahoofinance"
 
@@ -17,12 +20,13 @@ import (
 
 // Handler provides HTTP handlers for portfolio summary.
 type Handler struct {
-	db *gorm.DB
-	yf *yahoofinance.CachedClient
+	db             *gorm.DB
+	yf             *yahoofinance.CachedClient
+	instrumentSvc  *instrument.Service
 }
 
-func NewHandler(db *gorm.DB, yf *yahoofinance.CachedClient) *Handler {
-	return &Handler{db: db, yf: yf}
+func NewHandler(db *gorm.DB, yf *yahoofinance.CachedClient, instrumentSvc *instrument.Service) *Handler {
+	return &Handler{db: db, yf: yf, instrumentSvc: instrumentSvc}
 }
 
 // getOrCreatePortfolio returns the user's default portfolio, creating it if needed.
@@ -52,28 +56,24 @@ type PositionResponse struct {
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
 	UnrealizedPct float64 `json:"unrealized_pnl_pct"`
 	Weight        float64 `json:"weight_pct"`
+	Sector        string  `json:"sector"`
+	EntryDate     string  `json:"entry_date"`
 }
 
-// Summary returns all open positions with live prices and unrealized P&L.
-func (h *Handler) Summary(c *gin.Context) {
-	userID, ok := auth.GetCurrentUserID(c)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
+type summaryData struct {
+	Positions           []PositionResponse
+	TotalValue          float64
+	TotalCost           float64
+	TotalUnrealizedPnL  float64
+	TotalUnrealizedPct  float64
+	TotalRealizedPnL    float64
+	TotalPnL            float64
+	TotalPnLPct         float64
+}
 
-	p, err := h.getOrCreatePortfolio(userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "portfolio error"})
-		return
-	}
-
-	var txs []model.Transaction
-	if err := h.db.Where("portfolio_id = ?", p.ID).Order("trade_date ASC").Find(&txs).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
-		return
-	}
-
+// buildSummaryData fetches positions, prices, and computes all portfolio metrics.
+// Shared by Summary and ExportCSV.
+func (h *Handler) buildSummaryData(c *gin.Context, portfolioID uuid.UUID, txs []model.Transaction) (*summaryData, error) {
 	positions, realized := CalculatePositions(txs)
 
 	// Collect open symbols
@@ -86,15 +86,12 @@ func (h *Handler) Summary(c *gin.Context) {
 	priceInfos := make(map[string]yahoofinance.PriceInfo)
 	if len(symbols) > 0 {
 		if yahoofinance.IsUSMarketOpen() {
-			// Market is open — use live quotes
 			if fetched, err := h.yf.GetCurrentPriceInfos(c.Request.Context(), symbols); err == nil {
 				priceInfos = fetched
 			} else {
 				log.Printf("[portfolio] GetCurrentPriceInfos error: %v", err)
 			}
 		} else {
-			// Market is closed — use the last official closing price so badges reflect
-			// the last trading day rather than a potentially stale or missing live quote.
 			lastDay := yahoofinance.LastTradingDay()
 			type priceRow struct {
 				Symbol     string
@@ -113,7 +110,6 @@ func (h *Handler) Summary(c *gin.Context) {
 				}
 			}
 
-			// For symbols still missing from DB cache, fetch last trading day via Yahoo Finance historical API.
 			var missing []string
 			for _, sym := range symbols {
 				if priceInfos[sym].Price == 0 {
@@ -126,7 +122,6 @@ func (h *Handler) Summary(c *gin.Context) {
 					log.Printf("[portfolio] GetHistorical fallback error for %s: %v", sym, err)
 					continue
 				}
-				// Use the last bar (most recent close on or before lastDay)
 				if len(bars) > 0 {
 					last := bars[len(bars)-1]
 					priceInfos[sym] = yahoofinance.PriceInfo{Price: last.ClosePrice}
@@ -134,7 +129,7 @@ func (h *Handler) Summary(c *gin.Context) {
 			}
 		}
 
-		// Final fallback: for any symbol still missing a price, use whatever is newest in DB.
+		// Final fallback: newest price in DB
 		var stillMissing []string
 		for _, sym := range symbols {
 			if priceInfos[sym].Price == 0 {
@@ -160,12 +155,15 @@ func (h *Handler) Summary(c *gin.Context) {
 				}
 			}
 		}
+
 	}
 
-	// Record price source timestamp for staleness info
-	_ = time.Now() // used implicitly via log timestamps
+	// Ensure instrument metadata (sector, company_name) is up to date in DB.
+	// EnsureInstruments is best-effort and non-blocking on error.
+	h.instrumentSvc.EnsureInstruments(c.Request.Context(), symbols)
 
-	// Compute total market value for weight calculation
+	instruments := h.instrumentSvc.GetBySymbols(c.Request.Context(), symbols)
+
 	var totalMarketValue float64
 	for _, pos := range positions {
 		totalMarketValue += pos.Quantity * priceInfos[pos.Symbol].Price
@@ -185,9 +183,22 @@ func (h *Handler) Summary(c *gin.Context) {
 		if totalMarketValue > 0 {
 			weight = mv / totalMarketValue * 100
 		}
+		entryDate := ""
+		if !pos.EntryDate.IsZero() {
+			entryDate = pos.EntryDate.Format("2006-01-02")
+		}
+		// Use instrument metadata (DB) as source of truth; fall back to transaction data.
+		companyName := pos.CompanyName
+		sector := ""
+		if inst, ok := instruments[pos.Symbol]; ok {
+			if inst.CompanyName != "" {
+				companyName = inst.CompanyName
+			}
+			sector = inst.Sector
+		}
 		result = append(result, PositionResponse{
 			Symbol:        pos.Symbol,
-			CompanyName:   pos.CompanyName,
+			CompanyName:   companyName,
 			Quantity:      pos.Quantity,
 			AvgCost:       pos.AvgCost,
 			CostBasis:     pos.CostBasis,
@@ -197,10 +208,11 @@ func (h *Handler) Summary(c *gin.Context) {
 			UnrealizedPnL: unrealized,
 			UnrealizedPct: unrealizedPct,
 			Weight:        weight,
+			Sector:        sector,
+			EntryDate:     entryDate,
 		})
 	}
 
-	// Stable sort by symbol
 	sort.Slice(result, func(i, j int) bool { return result[i].Symbol < result[j].Symbol })
 
 	totalCost := 0.0
@@ -214,7 +226,6 @@ func (h *Handler) Summary(c *gin.Context) {
 		totalUnrealizedPct = totalUnrealizedPnL / totalCost * 100
 	}
 
-	// Aggregate realized P&L
 	realizedBySymbol := AggregateRealizedPnL(realized)
 	totalRealizedPnL := 0.0
 	for _, pnl := range realizedBySymbol {
@@ -227,16 +238,100 @@ func (h *Handler) Summary(c *gin.Context) {
 		totalPnLPct = totalPnL / totalCost * 100
 	}
 
+	return &summaryData{
+		Positions:          result,
+		TotalValue:         totalMarketValue,
+		TotalCost:          totalCost,
+		TotalUnrealizedPnL: totalUnrealizedPnL,
+		TotalUnrealizedPct: totalUnrealizedPct,
+		TotalRealizedPnL:   totalRealizedPnL,
+		TotalPnL:           totalPnL,
+		TotalPnLPct:        totalPnLPct,
+	}, nil
+}
+
+// Summary returns all open positions with live prices and unrealized P&L.
+func (h *Handler) Summary(c *gin.Context) {
+	userID, ok := auth.GetCurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	p, err := h.getOrCreatePortfolio(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "portfolio error"})
+		return
+	}
+
+	var txs []model.Transaction
+	if err := h.db.Where("portfolio_id = ?", p.ID).Order("trade_date ASC").Find(&txs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	data, err := h.buildSummaryData(c, p.ID, txs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "summary failed"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"positions":                result,
-		"total_value":              totalMarketValue,
-		"total_cost":               totalCost,
-		"total_unrealized_pnl":     totalUnrealizedPnL,
-		"total_unrealized_pnl_pct": totalUnrealizedPct,
-		"total_realized_pnl":       totalRealizedPnL,
-		"total_pnl":                totalPnL,
-		"total_pnl_pct":            totalPnLPct,
+		"positions":                data.Positions,
+		"total_value":              data.TotalValue,
+		"total_cost":               data.TotalCost,
+		"total_unrealized_pnl":     data.TotalUnrealizedPnL,
+		"total_unrealized_pnl_pct": data.TotalUnrealizedPct,
+		"total_realized_pnl":       data.TotalRealizedPnL,
+		"total_pnl":                data.TotalPnL,
+		"total_pnl_pct":            data.TotalPnLPct,
 	})
+}
+
+// ExportCSV streams portfolio holdings as a CSV file download.
+func (h *Handler) ExportCSV(c *gin.Context) {
+	userID, ok := auth.GetCurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	p, err := h.getOrCreatePortfolio(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "portfolio error"})
+		return
+	}
+
+	var txs []model.Transaction
+	if err := h.db.Where("portfolio_id = ?", p.ID).Order("trade_date ASC").Find(&txs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+
+	data, err := h.buildSummaryData(c, p.ID, txs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "export failed"})
+		return
+	}
+
+	filename := fmt.Sprintf("portfolio_%s.csv", time.Now().Format("2006-01-02"))
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+
+	w := csv.NewWriter(c.Writer)
+	_ = w.Write([]string{"Ticker", "Shares", "Avg Cost (USD)", "Current Price (USD)", "Sector", "Entry Date", "Portfolio % weight"})
+	for _, pos := range data.Positions {
+		_ = w.Write([]string{
+			pos.Symbol,
+			fmt.Sprintf("%.5f", pos.Quantity),
+			fmt.Sprintf("%.4f", pos.AvgCost),
+			fmt.Sprintf("%.4f", pos.CurrentPrice),
+			pos.Sector,
+			pos.EntryDate,
+			fmt.Sprintf("%.2f", pos.Weight),
+		})
+	}
+	w.Flush()
 }
 
 // Quote returns company name and current price for a given symbol.

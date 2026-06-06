@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"portfolio-tracker/internal/auth"
+	"portfolio-tracker/internal/instrument"
 	"portfolio-tracker/internal/model"
 	"portfolio-tracker/internal/portfolio"
 	"portfolio-tracker/internal/yahoofinance"
@@ -20,12 +21,13 @@ import (
 
 // Handler provides HTTP handlers for analytics endpoints.
 type Handler struct {
-	db *gorm.DB
-	yf *yahoofinance.CachedClient
+	db            *gorm.DB
+	yf            *yahoofinance.CachedClient
+	instrumentSvc *instrument.Service
 }
 
-func NewHandler(db *gorm.DB, yf *yahoofinance.CachedClient) *Handler {
-	return &Handler{db: db, yf: yf}
+func NewHandler(db *gorm.DB, yf *yahoofinance.CachedClient, instrumentSvc *instrument.Service) *Handler {
+	return &Handler{db: db, yf: yf, instrumentSvc: instrumentSvc}
 }
 
 // getOrCreatePortfolio returns the user's default portfolio, creating it if needed.
@@ -96,12 +98,13 @@ func (h *Handler) PnL(c *gin.Context) {
 		Entries       []SymbolPnL `json:"entries"`
 	}
 
-	// Build company name map from transactions
-	companyNames := make(map[string]string)
-	for _, tx := range txs {
-		if tx.CompanyName != "" {
-			companyNames[tx.Symbol] = tx.CompanyName
-		}
+	// Collect all symbols that appear in either positions or realized
+	symbolSet := make(map[string]struct{})
+	for sym := range positions {
+		symbolSet[sym] = struct{}{}
+	}
+	for sym := range realizedBySymbol {
+		symbolSet[sym] = struct{}{}
 	}
 
 	// Build realized cost basis per symbol (total cost of all shares sold)
@@ -110,13 +113,24 @@ func (h *Handler) PnL(c *gin.Context) {
 		realizedCostBasis[r.Symbol] += r.CostBasis
 	}
 
-	// Collect all symbols that appear in either positions or realized
-	symbolSet := make(map[string]struct{})
-	for sym := range positions {
-		symbolSet[sym] = struct{}{}
+	// Build company name map: prefer instruments DB, fall back to transactions.
+	allSymbols := make([]string, 0, len(symbolSet))
+	for sym := range symbolSet {
+		allSymbols = append(allSymbols, sym)
 	}
-	for sym := range realizedBySymbol {
-		symbolSet[sym] = struct{}{}
+	h.instrumentSvc.EnsureInstruments(c.Request.Context(), allSymbols)
+	instruments := h.instrumentSvc.GetBySymbols(c.Request.Context(), allSymbols)
+
+	companyNames := make(map[string]string)
+	for _, tx := range txs {
+		if tx.CompanyName != "" {
+			companyNames[tx.Symbol] = tx.CompanyName
+		}
+	}
+	for sym, inst := range instruments {
+		if inst.CompanyName != "" {
+			companyNames[sym] = inst.CompanyName
+		}
 	}
 
 	var totalRealized, totalUnrealized float64
