@@ -197,7 +197,25 @@ func (h *Handler) Performance(c *gin.Context) {
 		}
 	}
 
-	portfolioReturns, err := h.computePortfolioReturns(c, txs, from, to)
+	// If the US market is currently open and the requested range includes today,
+	// fetch live intraday prices so the chart extends to the current moment.
+	var todayPortfolioPrices map[string]float64
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	if !to.Before(today) && isUSMarketOpen() {
+		symSet := make(map[string]struct{})
+		for _, tx := range txs {
+			symSet[tx.Symbol] = struct{}{}
+		}
+		syms := make([]string, 0, len(symSet))
+		for sym := range symSet {
+			syms = append(syms, sym)
+		}
+		if fetched, err := h.yf.GetCurrentPrices(c.Request.Context(), syms); err == nil {
+			todayPortfolioPrices = fetched
+		}
+	}
+
+	portfolioReturns, err := h.computePortfolioReturns(c, txs, from, to, todayPortfolioPrices)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute portfolio returns: " + err.Error()})
 		return
@@ -208,6 +226,14 @@ func (h *Handler) Performance(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch benchmark data: " + err.Error()})
 		return
 	}
+
+	// Add today's benchmark intraday price when market is open.
+	if !to.Before(today) && isUSMarketOpen() {
+		if q, err := h.yf.GetQuote(c.Request.Context(), benchmark); err == nil && q.RegularMarketPrice > 0 {
+			benchmarkBars[today] = q.RegularMarketPrice
+		}
+	}
+
 	benchmarkReturns := barsToMapReturns(benchmarkBars)
 
 	// Build cumulative return series
@@ -274,7 +300,7 @@ func (h *Handler) Metrics(c *gin.Context) {
 		}
 	}
 
-	portfolioReturns, err := h.computePortfolioReturns(c, txs, from, to)
+	portfolioReturns, err := h.computePortfolioReturns(c, txs, from, to, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute portfolio returns: " + err.Error()})
 		return
@@ -404,13 +430,22 @@ func (h *Handler) fetchHistoricalWithCache(ctx context.Context, symbol string, f
 		Order("date ASC").Find(&cached)
 
 	dayMap := make(map[time.Time]float64, len(cached))
+	var latestCached time.Time
 	for _, c := range cached {
-		dayMap[c.Date.Truncate(24*time.Hour)] = c.ClosePrice
+		d := c.Date.Truncate(24 * time.Hour)
+		dayMap[d] = c.ClosePrice
+		if d.After(latestCached) {
+			latestCached = d
+		}
 	}
 
-	// If DB cache covers ≥50% of expected trading days, skip the API call
+	// If DB cache covers ≥50% of expected trading days, skip the API call —
+	// but only if the cache is fresh enough (latest entry is within 1 trading day
+	// of `to`). This prevents stale cache from creating gaps when `to` is today
+	// and yesterday's close was not yet cached.
 	expectedDays := int(to.Sub(from).Hours()/24) * 5 / 7
-	if len(dayMap) > 0 && len(dayMap) >= expectedDays/2 {
+	cacheIsFresh := !latestCached.IsZero() && to.Sub(latestCached) <= 3*24*time.Hour // covers weekends
+	if len(dayMap) > 0 && len(dayMap) >= expectedDays/2 && cacheIsFresh {
 		return dayMap, nil
 	}
 
@@ -449,10 +484,28 @@ func (h *Handler) fetchHistoricalWithCache(ctx context.Context, symbol string, f
 	return dayMap, nil
 }
 
+// isUSMarketOpen returns true when the US stock market is currently open.
+// Market hours: Monday–Friday 09:30–16:00 Eastern Time (no holiday calendar).
+func isUSMarketOpen() bool {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return false
+	}
+	now := time.Now().In(loc)
+	wd := now.Weekday()
+	if wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+	open := time.Date(now.Year(), now.Month(), now.Day(), 9, 30, 0, 0, loc)
+	close := time.Date(now.Year(), now.Month(), now.Day(), 16, 0, 0, 0, loc)
+	return now.After(open) && now.Before(close)
+}
+
 // computePortfolioReturns builds a daily Time-Weighted Return (TWR) series.
 // For each day d, we use positions held at close of d-1 and price them at d-1 vs d.
 // This removes the effect of cash flows (new buy/sell orders) from the return.
-func (h *Handler) computePortfolioReturns(c *gin.Context, txs []model.Transaction, from, to time.Time) ([]DailyReturn, error) {
+// todayPrices, if non-nil, injects intraday prices for the current trading day.
+func (h *Handler) computePortfolioReturns(c *gin.Context, txs []model.Transaction, from, to time.Time, todayPrices map[string]float64) ([]DailyReturn, error) {
 	// Collect all unique symbols
 	symbolSet := make(map[string]struct{})
 	for _, tx := range txs {
@@ -468,6 +521,19 @@ func (h *Handler) computePortfolioReturns(c *gin.Context, txs []model.Transactio
 			continue
 		}
 		allPrices[sym] = dayMap
+	}
+
+	// Inject intraday prices for today when the market is open.
+	if len(todayPrices) > 0 {
+		today := time.Now().UTC().Truncate(24 * time.Hour)
+		for sym, price := range todayPrices {
+			if price > 0 {
+				if allPrices[sym] == nil {
+					allPrices[sym] = make(map[time.Time]float64)
+				}
+				allPrices[sym][today] = price
+			}
+		}
 	}
 
 	// Collect all trading dates from any symbol
