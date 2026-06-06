@@ -85,32 +85,74 @@ func (h *Handler) Summary(c *gin.Context) {
 	// Fetch current prices (best-effort — missing prices leave current_price = 0)
 	priceInfos := make(map[string]yahoofinance.PriceInfo)
 	if len(symbols) > 0 {
-		if fetched, err := h.yf.GetCurrentPriceInfos(c.Request.Context(), symbols); err == nil {
-			priceInfos = fetched
-		} else {
-			log.Printf("[portfolio] GetCurrentPriceInfos error: %v", err)
-		}
-
-		// Fallback: for any symbol still missing a price, use the most recent DB-cached price
-		var missing []string
-		for _, sym := range symbols {
-			if priceInfos[sym].Price == 0 {
-				missing = append(missing, sym)
+		if yahoofinance.IsUSMarketOpen() {
+			// Market is open — use live quotes
+			if fetched, err := h.yf.GetCurrentPriceInfos(c.Request.Context(), symbols); err == nil {
+				priceInfos = fetched
+			} else {
+				log.Printf("[portfolio] GetCurrentPriceInfos error: %v", err)
 			}
-		}
-		if len(missing) > 0 {
+		} else {
+			// Market is closed — use the last official closing price so badges reflect
+			// the last trading day rather than a potentially stale or missing live quote.
+			lastDay := yahoofinance.LastTradingDay()
 			type priceRow struct {
 				Symbol     string
 				ClosePrice float64
 			}
 			var rows []priceRow
-			// For each missing symbol, get the latest cached close price
+			h.db.Raw(`
+				SELECT DISTINCT ON (symbol) symbol, close_price
+				FROM price_cache_histories
+				WHERE symbol IN ? AND date <= ?
+				ORDER BY symbol, date DESC
+			`, symbols, lastDay.Add(24*time.Hour)).Scan(&rows)
+			for _, r := range rows {
+				if r.ClosePrice > 0 {
+					priceInfos[r.Symbol] = yahoofinance.PriceInfo{Price: r.ClosePrice}
+				}
+			}
+
+			// For symbols still missing from DB cache, fetch last trading day via Yahoo Finance historical API.
+			var missing []string
+			for _, sym := range symbols {
+				if priceInfos[sym].Price == 0 {
+					missing = append(missing, sym)
+				}
+			}
+			for _, sym := range missing {
+				bars, err := h.yf.GetHistorical(c.Request.Context(), sym, lastDay.AddDate(0, 0, -7), lastDay)
+				if err != nil {
+					log.Printf("[portfolio] GetHistorical fallback error for %s: %v", sym, err)
+					continue
+				}
+				// Use the last bar (most recent close on or before lastDay)
+				if len(bars) > 0 {
+					last := bars[len(bars)-1]
+					priceInfos[sym] = yahoofinance.PriceInfo{Price: last.ClosePrice}
+				}
+			}
+		}
+
+		// Final fallback: for any symbol still missing a price, use whatever is newest in DB.
+		var stillMissing []string
+		for _, sym := range symbols {
+			if priceInfos[sym].Price == 0 {
+				stillMissing = append(stillMissing, sym)
+			}
+		}
+		if len(stillMissing) > 0 {
+			type priceRow struct {
+				Symbol     string
+				ClosePrice float64
+			}
+			var rows []priceRow
 			h.db.Raw(`
 				SELECT DISTINCT ON (symbol) symbol, close_price
 				FROM price_cache_histories
 				WHERE symbol IN ?
 				ORDER BY symbol, date DESC
-			`, missing).Scan(&rows)
+			`, stillMissing).Scan(&rows)
 			for _, r := range rows {
 				if r.ClosePrice > 0 {
 					priceInfos[r.Symbol] = yahoofinance.PriceInfo{Price: r.ClosePrice}
@@ -217,9 +259,10 @@ func (h *Handler) Quote(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"symbol":       q.Symbol,
-		"company_name": name,
-		"price":        q.RegularMarketPrice,
-		"currency":     q.Currency,
+		"symbol":         q.Symbol,
+		"company_name":   name,
+		"price":          q.RegularMarketPrice,
+		"day_change_pct": q.RegularMarketChangePercent,
+		"currency":       q.Currency,
 	})
 }
