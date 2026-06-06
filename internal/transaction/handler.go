@@ -190,6 +190,66 @@ func (h *Handler) Delete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 
+// Update modifies an existing transaction owned by the authenticated user.
+func (h *Handler) Update(c *gin.Context) {
+	userID, ok := auth.GetCurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid transaction id"})
+		return
+	}
+
+	var req createRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	tradeDate, err := time.Parse("2006-01-02", req.TradeDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trade_date must be YYYY-MM-DD"})
+		return
+	}
+
+	p, err := h.getOrCreatePortfolio(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "portfolio error"})
+		return
+	}
+
+	var tx model.Transaction
+	if err := h.db.Where("id = ? AND portfolio_id = ?", id, p.ID).First(&tx).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "transaction not found"})
+		return
+	}
+
+	gross := req.Quantity * req.TradedPrice
+	net := gross - req.Commission - req.VAT
+
+	tx.Symbol = req.Symbol
+	tx.CompanyName = req.CompanyName
+	tx.TradeDate = tradeDate
+	tx.Action = model.TransactionAction(req.Action)
+	tx.Quantity = req.Quantity
+	tx.TradedPrice = req.TradedPrice
+	tx.GrossAmount = gross
+	tx.Commission = req.Commission
+	tx.VAT = req.VAT
+	tx.NetAmount = net
+
+	if err := h.db.Save(&tx).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "update failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, tx)
+}
+
 // ImportCSV parses a multipart/form-data CSV file and bulk-inserts transactions.
 func (h *Handler) ImportCSV(c *gin.Context) {
 	userID, ok := auth.GetCurrentUserID(c)
