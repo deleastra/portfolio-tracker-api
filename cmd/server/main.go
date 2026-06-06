@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"log"
+	"time"
 
 	"portfolio-tracker/internal/analytics"
 	"portfolio-tracker/internal/auth"
@@ -36,8 +38,15 @@ func main() {
 
 	yfClient := yahoofinance.NewCachedClient(cfg.YahooFinanceBaseURL, rdb, cfg.YahooPriceCacheTTL)
 
-	authSvc := auth.NewService(db, cfg.JWTSecret, cfg.JWTAccessExpiry, cfg.JWTRefreshExpiry)
-	authHandler := auth.NewHandler(authSvc)
+	// Invalidate stale price cache on startup so first requests fetch fresh prices
+	if err := yfClient.InvalidateAll(context.Background()); err != nil {
+		log.Printf("warning: failed to invalidate price cache on startup: %v", err)
+	} else {
+		log.Println("price cache invalidated on startup")
+	}
+
+	authSvc := auth.NewService(db, rdb, cfg.JWTSecret, cfg.JWTAccessExpiry, cfg.JWTRefreshExpiry)
+	authHandler := auth.NewHandler(authSvc, cfg)
 	txHandler := transaction.NewHandler(db)
 	portfolioHandler := portfolio.NewHandler(db, yfClient)
 	analyticsHandler := analytics.NewHandler(db, yfClient)
@@ -56,18 +65,21 @@ func main() {
 	{
 		authGroup := api.Group("/auth")
 		{
-			authGroup.POST("/register", authHandler.Register)
-			authGroup.POST("/login", authHandler.Login)
+			authGroup.POST("/register", auth.NewRateLimitMiddleware(rdb, 3, time.Minute), authHandler.Register)
+			authGroup.POST("/login", auth.NewRateLimitMiddleware(rdb, 5, time.Minute), authHandler.Login)
 			authGroup.POST("/refresh", authHandler.Refresh)
+			authGroup.POST("/logout", authHandler.Logout)
 		}
 
 		protected := api.Group("/")
 		protected.Use(auth.JWTMiddleware(authSvc))
 		{
 			protected.GET("/portfolio/summary", portfolioHandler.Summary)
+			protected.GET("/portfolio/quote/:symbol", portfolioHandler.Quote)
 
 			protected.GET("/transactions", txHandler.List)
 			protected.POST("/transactions", txHandler.Create)
+			protected.PUT("/transactions/:id", txHandler.Update)
 			protected.DELETE("/transactions/:id", txHandler.Delete)
 			protected.POST("/transactions/import", txHandler.ImportCSV)
 
