@@ -47,6 +47,7 @@ type PositionResponse struct {
 	AvgCost       float64 `json:"avg_cost"`
 	CostBasis     float64 `json:"cost_basis"`
 	CurrentPrice  float64 `json:"current_price"`
+	DayChangePct  float64 `json:"day_change_pct"`
 	MarketValue   float64 `json:"market_value"`
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
 	UnrealizedPct float64 `json:"unrealized_pnl_pct"`
@@ -82,18 +83,18 @@ func (h *Handler) Summary(c *gin.Context) {
 	}
 
 	// Fetch current prices (best-effort — missing prices leave current_price = 0)
-	prices := make(map[string]float64)
+	priceInfos := make(map[string]yahoofinance.PriceInfo)
 	if len(symbols) > 0 {
-		if fetched, err := h.yf.GetCurrentPrices(c.Request.Context(), symbols); err == nil {
-			prices = fetched
+		if fetched, err := h.yf.GetCurrentPriceInfos(c.Request.Context(), symbols); err == nil {
+			priceInfos = fetched
 		} else {
-			log.Printf("[portfolio] GetCurrentPrices error: %v", err)
+			log.Printf("[portfolio] GetCurrentPriceInfos error: %v", err)
 		}
 
 		// Fallback: for any symbol still missing a price, use the most recent DB-cached price
 		var missing []string
 		for _, sym := range symbols {
-			if prices[sym] == 0 {
+			if priceInfos[sym].Price == 0 {
 				missing = append(missing, sym)
 			}
 		}
@@ -112,7 +113,7 @@ func (h *Handler) Summary(c *gin.Context) {
 			`, missing).Scan(&rows)
 			for _, r := range rows {
 				if r.ClosePrice > 0 {
-					prices[r.Symbol] = r.ClosePrice
+					priceInfos[r.Symbol] = yahoofinance.PriceInfo{Price: r.ClosePrice}
 					log.Printf("[portfolio] using cached DB price for %s: %.4f", r.Symbol, r.ClosePrice)
 				}
 			}
@@ -125,12 +126,13 @@ func (h *Handler) Summary(c *gin.Context) {
 	// Compute total market value for weight calculation
 	var totalMarketValue float64
 	for _, pos := range positions {
-		totalMarketValue += pos.Quantity * prices[pos.Symbol]
+		totalMarketValue += pos.Quantity * priceInfos[pos.Symbol].Price
 	}
 
 	result := make([]PositionResponse, 0, len(positions))
 	for _, pos := range positions {
-		price := prices[pos.Symbol]
+		info := priceInfos[pos.Symbol]
+		price := info.Price
 		mv := pos.Quantity * price
 		unrealized := mv - pos.CostBasis
 		unrealizedPct := 0.0
@@ -148,6 +150,7 @@ func (h *Handler) Summary(c *gin.Context) {
 			AvgCost:       pos.AvgCost,
 			CostBasis:     pos.CostBasis,
 			CurrentPrice:  price,
+			DayChangePct:  info.DayChangePct,
 			MarketValue:   mv,
 			UnrealizedPnL: unrealized,
 			UnrealizedPct: unrealizedPct,
@@ -191,5 +194,32 @@ func (h *Handler) Summary(c *gin.Context) {
 		"total_realized_pnl":       totalRealizedPnL,
 		"total_pnl":                totalPnL,
 		"total_pnl_pct":            totalPnLPct,
+	})
+}
+
+// Quote returns company name and current price for a given symbol.
+func (h *Handler) Quote(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol required"})
+		return
+	}
+
+	q, err := h.yf.GetQuote(c.Request.Context(), symbol)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to fetch quote"})
+		return
+	}
+
+	name := q.LongName
+	if name == "" {
+		name = q.ShortName
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":       q.Symbol,
+		"company_name": name,
+		"price":        q.RegularMarketPrice,
+		"currency":     q.Currency,
 	})
 }
