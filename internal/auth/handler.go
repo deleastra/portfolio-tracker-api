@@ -30,7 +30,7 @@ func (h *Handler) setRefreshCookie(c *gin.Context, token string) {
 		refreshTokenCookie,
 		token,
 		maxAge,
-		"/",
+		"/api/auth",
 		h.cfg.CookieDomain,
 		h.cfg.CookieSecure,
 		true, // httpOnly
@@ -39,7 +39,7 @@ func (h *Handler) setRefreshCookie(c *gin.Context, token string) {
 
 func (h *Handler) clearRefreshCookie(c *gin.Context) {
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(refreshTokenCookie, "", -1, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
+	c.SetCookie(refreshTokenCookie, "", -1, "/api/auth", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
 }
 
 // setCSRFCookie generates a new CSRF token and sets it as a non-httpOnly cookie.
