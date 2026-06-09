@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"log"
 	"net/http"
 
 	"portfolio-tracker/internal/config"
@@ -41,6 +42,21 @@ func (h *Handler) clearRefreshCookie(c *gin.Context) {
 	c.SetCookie(refreshTokenCookie, "", -1, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, true)
 }
 
+// setCSRFCookie generates a new CSRF token and sets it as a non-httpOnly cookie.
+// On error, the request is not aborted — CSRF is defense-in-depth.
+func (h *Handler) setCSRFCookie(c *gin.Context) {
+	token, err := GenerateCSRFToken()
+	if err != nil {
+		log.Printf("[auth] failed to generate CSRF token: %v", err)
+		return
+	}
+	SetCSRFCookie(c, token, h.cfg.CookieSecure, h.cfg.CookieDomain)
+}
+
+func (h *Handler) clearCSRFCookie(c *gin.Context) {
+	ClearCSRFCookie(c, h.cfg.CookieSecure, h.cfg.CookieDomain)
+}
+
 func (h *Handler) Register(c *gin.Context) {
 	var req struct {
 		Email    string `json:"email" binding:"required,email"`
@@ -68,6 +84,7 @@ func (h *Handler) Register(c *gin.Context) {
 	}
 
 	h.setRefreshCookie(c, pair.RefreshToken)
+	h.setCSRFCookie(c)
 	c.JSON(http.StatusCreated, gin.H{"id": user.ID, "email": user.Email, "access_token": pair.AccessToken})
 }
 
@@ -92,6 +109,7 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 
 	h.setRefreshCookie(c, pair.RefreshToken)
+	h.setCSRFCookie(c)
 	c.JSON(http.StatusOK, gin.H{"access_token": pair.AccessToken})
 }
 
@@ -110,6 +128,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 	}
 
 	h.setRefreshCookie(c, pair.RefreshToken)
+	h.setCSRFCookie(c)
 	c.JSON(http.StatusOK, gin.H{"access_token": pair.AccessToken})
 }
 
@@ -119,6 +138,7 @@ func (h *Handler) Logout(c *gin.Context) {
 		_ = h.svc.InvalidateRefreshToken(c.Request.Context(), refreshToken)
 	}
 	h.clearRefreshCookie(c)
+	h.clearCSRFCookie(c)
 	c.Status(http.StatusNoContent)
 }
 

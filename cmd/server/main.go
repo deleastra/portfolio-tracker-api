@@ -79,6 +79,7 @@ func main() {
 
 		protected := api.Group("/")
 		protected.Use(auth.JWTMiddleware(authSvc))
+		protected.Use(auth.CSRFMiddleware())
 		{
 			protected.GET("/portfolio/summary", portfolioHandler.Summary)
 			protected.GET("/portfolio/export/csv", portfolioHandler.ExportCSV)
