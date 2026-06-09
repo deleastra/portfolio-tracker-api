@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"portfolio-tracker/internal/analytics"
@@ -92,8 +96,51 @@ func main() {
 		}
 	}
 
-	log.Printf("starting server on :%s (env=%s)", cfg.AppPort, cfg.AppEnv)
-	if err := r.Run(":" + cfg.AppPort); err != nil {
-		log.Fatalf("server error: %v", err)
+	srv := &http.Server{
+		Addr:    ":" + cfg.AppPort,
+		Handler: r.Handler(),
 	}
+
+	// Run server in a goroutine so we can listen for shutdown signals.
+	go func() {
+		log.Printf("starting server on :%s (env=%s)", cfg.AppPort, cfg.AppEnv)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// ── Graceful shutdown ──────────────────────────────────────────────────
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+	log.Printf("received signal %v, initiating graceful shutdown...", sig)
+
+	// Give outstanding requests up to 30s to complete.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server forced to shutdown: %v", err)
+	} else {
+		log.Println("http server shut down gracefully")
+	}
+
+	// Close database connection pool.
+	sqlDB, err := db.DB()
+	if err == nil {
+		if err := sqlDB.Close(); err != nil {
+			log.Printf("error closing postgres pool: %v", err)
+		} else {
+			log.Println("postgres connection pool closed")
+		}
+	}
+
+	// Close Redis connection.
+	if err := rdb.Close(); err != nil {
+		log.Printf("error closing redis: %v", err)
+	} else {
+		log.Println("redis connection closed")
+	}
+
+	log.Println("server stopped")
 }
